@@ -1,0 +1,330 @@
+---
+title: "PML_peer_reviewed_project"
+author: "Lauren Grodnicki"
+date: "September 20, 2014"
+output: html_document
+---
+In this project we use the Weight Lifting Exercises Dataset (http://groupware.les.inf.puc-rio.br/static/WLE/WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv) from the HAR project (see http://groupware.les.inf.puc-rio.br/har). The goal of this project was to determine the class of activity of twenty test samples after training an algorithm on 19,622 "training" samples. 
+
+### Cleaning the data
+After brief exploratory analysis, I found that 100 columns had zero or near-zero variance. Those columns were eliminated from the training data. I also eliminated the columns for time, window, and rowNumber:
+
+```{r cachedChunkLoadData, cache = TRUE}
+traindata <- read.csv("pml-training.csv", stringsAsFactors = FALSE)
+testdata <- read.csv("pml-testing.csv", stringsAsFactors = FALSE)
+library(caret, quietly = TRUE); library(AppliedPredictiveModeling, quietly = TRUE);
+library(e1071, quietly = TRUE); library(rpart, quietly = TRUE)
+library(randomForest, quietly = TRUE); library(rattle, quietly = TRUE); 
+library(gbm, quietly = TRUE); library(lattice, quietly = TRUE); 
+library(ggplot2, quietly = TRUE); library(ipred, quietly = TRUE); 
+library(plyr, quietly = TRUE)
+ 
+cleanDataForPMProject <- function(traindata, testdata){
+      nrow <- dim(traindata)[1]; ncol <- dim(traindata)[2]
+      ## cols 1-8 are id's and times, so don't worry about those yet
+      badcolnames <- NULL
+      badcols <- NULL
+      nms <- names(traindata)
+      ## get rid of columns that don't have enough variance:
+      for (i in 8:dim(traindata)[2]) {
+            if (length(unique(traindata[[i]])) <= 2) {
+                  badcolnames <- c(badcolnames, nms[i])
+                  badcols <- c(badcols, i)
+            }
+      }
+      nbadcols <- length(badcols)   
+      
+      colclass <- character(ncol)
+      for (i in 1:ncol) {colclass[i] <- class(traindata[[i]])}
+      charcols <- which(colclass == "character")
+      
+      nullfrac <- numeric(length(charcols))
+      for (i in 1:length(nullfrac)){
+            nullfrac[i] <- length(which(traindata[,charcols[i]] == ""))/nrow
+      } 
+      getrid1 <- which(nullfrac > .3)
+      for (i in 1:length(getrid1)){
+            badcolnames <- c(badcolnames, nms[charcols[getrid1[i]]])
+            badcols <- c(badcols, charcols[getrid1[i]])
+      }
+      badcols <- unique(badcols)
+      badcolnames <- unique(badcolnames)
+      subs <- subset(traindata, select = -c(badcols))
+      subst <- subset(testdata, select = -c(badcols))
+      ## next step - find which rows have NAs, which cols have lots of na's      
+      
+      rownas <- integer(nrow)
+      newncol <- dim(subs)[2]     
+      newnames <- names(subs)
+      colnas <- integer(newncol)
+      for (i in 1:nrow) { rownas[i] <- sum(!is.na(subs[i,]))}
+      for (i in 1:newncol) { colnas[i] <- sum(!is.na(subs[,i]))}
+      rownasfrac <- rownas/newncol
+      colnasfrac <- colnas/nrow
+      fullrows <- which(rownasfrac > .5)
+      subs[fullrows,127]
+      fullcols <- which(colnasfrac > .1)
+      
+      ## so use only the cols that are mostly not empty:
+      newtraining <- subset(subs, select = fullcols)
+      newtest <- subset(subst, select = fullcols)
+      newtraining$user_name <- factor(newtraining$user_name)
+      newtest$user_name <- factor(newtest$user_name)
+      newtraining$classe <- factor(newtraining$classe)
+      return(list(traindata = newtraining, testdata = newtest))
+}
+
+li <- cleanDataForPMProject(traindata, testdata)
+newtraining <- li$traindata
+betterTestData <- li$testdata
+
+```
+
+I also partitioned the data into training, testing, and validation sets:
+
+```{r cachedChunkPartitionData, cache = TRUE, warning = FALSE}
+notimes <- subset(newtraining, select = -c(X, raw_timestamp_part_1,
+                                           raw_timestamp_part_2, cvtd_timestamp,
+                                           num_window, new_window))
+testNotimes <- subset(betterTestData, select = -c(X, raw_timestamp_part_1,
+                                               raw_timestamp_part_2, cvtd_timestamp,
+                                               num_window, new_window))
+set.seed(1234)
+part1 <- createDataPartition(y = notimes$classe, p=0.8, list=FALSE)
+validation <- notimes[-part1,]
+playset <- notimes[part1,]
+set.seed(5678)
+inTrain <- createDataPartition(y = playset$classe, p=0.75, list = FALSE)
+training <- playset[inTrain,]
+testing <- playset[-inTrain,]
+s <- split(training, training$user_name)
+st <- split(testing, testing$user_name)
+sp <- split(playset, playset$user_name)
+v <- split(validation, validation$user_name)
+ts <- split(testNotimes, testNotimes$user_name)
+
+```
+I computed the correlation between variables and found that many were highly correlated. I plotted pairs of variables and combinations of pairs of variables, and discovered that the different users were often on different parts of the plot. I also found that the classes of activity showed very different patterns for the different users. 
+
+
+```{r fig1, fig.height = 4, fig.width=5}
+library(ggplot2)
+C <- which(training$classe == "C")
+c_only <- training[C,]
+ggplot(data = c_only, aes(x=roll_belt, y=yaw_belt)) + 
+             geom_point(data=c_only, aes(color=user_name)) + ggtitle("Activity class C")
+```
+
+```{r morePlots, warning=FALSE, fig.show='hold', fig.width=9, fig.height=4}
+library(grid, quietly = TRUE)
+ch <- which(training$user_name == "charles")
+p1 <- qplot(roll_belt, yaw_belt, data = training[ch,], colour = classe, main = 
+            "Charles")
+e <- which(training$user_name == "eurico")
+p2 <- qplot(roll_belt, yaw_belt, data = training[e,], colour = classe, main = "Eurico")
+
+pushViewport(viewport(layout = grid.layout(1,2)))
+print(p1, vp = viewport(layout.pos.row = 1, layout.pos.col=1))
+print(p2, vp = viewport(layout.pos.row = 1, layout.pos.col=2))
+           
+```
+
+Therefore, I split the training data by user before performing the fits. I ran train with "treebag", "rpart", "tree", and "lda", and found that "treebag" yielded the highest accuracy by more than 20 percentage points. Adelmo and Jeremy each had three additional columns of non-zero variance, so I removed those columns for their individual fits. 
+
+```{r cachedChunkFitAdelmo, cache = TRUE, warning=FALSE}
+
+## adelmo
+ad <- subset(sp[[1]], select = -c(pitch_forearm, yaw_forearm, roll_forearm))
+av <- subset(v[[1]], select =-c(pitch_forearm, yaw_forearm, roll_forearm))
+at <- subset(ts[[1]], select =-c(pitch_forearm, yaw_forearm, roll_forearm))
+
+set.seed(12345)
+fit_adelmo <- train(classe ~ ., data = ad, method = "treebag")
+pred_adelmo <- predict(fit_adelmo, av)
+test_adelmo <- predict(fit_adelmo, at)
+for (i in 1:length(at$problem_id)) {
+      filename <- paste0("testData", as.character(at$problem_id[i]), ".txt")
+                         write(as.character(test_adelmo[i]), file = filename)
+}
+```
+
+```{r cachedChunkCarlitos, cache = TRUE, warning=FALSE}
+set.seed(12345)
+fit_carlitos <- train(classe ~ ., data = sp[[2]], method = "treebag")
+pred_carlitos <- predict(fit_carlitos, v[[2]])
+test_carlitos <- predict(fit_carlitos, ts[[2]])
+for (i in 1:length(ts[[2]]$problem_id)) {
+      filename <- paste0("testData",as.character(ts[[2]]$problem_id[i]), ".txt")
+      write(as.character(test_carlitos[i]), file = filename)
+}
+```
+
+```{r cachedChunkCharles, cache = TRUE, warning=FALSE}
+set.seed(12345)
+fit_charles <- train(classe ~ ., data = sp[[3]], method = "treebag")
+test_charles <- predict(fit_charles, ts[[3]])
+pred_charles <- predict(fit_charles, v[[3]])
+for (i in 1:length(ts[[3]]$problem_id)) {
+      filename <- paste0("testData", as.character(ts[[3]]$problem_id[i]), ".txt")
+      write(as.character(test_charles[i]), file = filename)
+}
+```
+
+```{r cachedChunkEurico, cache = TRUE, warning=FALSE}
+set.seed(12345)
+fit_eurico <- train(classe ~ ., data = sp[[4]], method = "treebag")
+test_eurico <- predict(fit_eurico, ts[[4]])
+pred_eurico <- predict(fit_eurico, v[[4]])
+for (i in 1:length(ts[[4]]$problem_id)) {
+      filename <- paste0("testData",as.character(ts[[4]]$problem_id[i]), ".txt")
+      write(as.character(test_eurico[i]), file = filename)
+}
+```
+
+```{r cachedChunkJeremy, cache = TRUE, warning=FALSE}
+jeremy <- subset(sp[[5]], select = -c(pitch_arm, yaw_arm, roll_arm))
+jv <- subset(v[[5]], select = -c(pitch_arm, yaw_arm, roll_arm))
+jt <- subset(ts[[5]], select = -c(pitch_arm, yaw_arm, roll_arm))
+set.seed(12345)
+fit_j <- train(classe ~ ., data = jeremy, method = "treebag")
+pred_jeremy <- predict(fit_j, jv)
+test_j <- predict(fit_j, jt)
+for (i in 1:length(jt$problem_id)) {
+      filename <- paste0("testData",as.character(jt$problem_id[i]), ".txt")
+      write(as.character(test_j[i]), file = filename)
+}
+```
+
+```{r cachedChunkPedro, cache = TRUE, warning=FALSE}
+set.seed(12345)
+fit_pedro <- train(classe ~ ., data = sp[[6]], method = "treebag")
+test_pedro <- predict(fit_pedro, ts[[6]])
+pred_pedro <- predict(fit_pedro, v[[6]])
+for (i in 1:length(ts[[6]]$problem_id)) {
+      filename <- paste0("testData",as.character(ts[[6]]$problem_id[i]), ".txt")
+      write(as.character(test_pedro[i]), file = filename)
+}
+
+```
+
+### Sample error and cross-validation
+
+I had 0% in-sample error and low (<= 2%) out-of-sample error on both the testing and validation sets. Because of the long processing time, I focused on one user. There were 11 classes that train missed with carlitos. I repartitioned the training and testing sets 9 times using createDataPartition with different seeds and reran train on each new training set. I used the resulting models to predict on the original missed cases. The majority of the retrained predictions were the same as the original incorrect classes. Therefore, I chose to use only one iteration of train on the non-validation training set to predict the 20 test cases. This algorithm achieved a score of 20/20 on the submission portion of this assignment.
+
+The out-of-sample errors broken down by class are shown below:
+
+```{r cachedChunkErrs, echo=FALSE}
+wa <- which(pred_adelmo != av$classe)
+a_a <- which(av$classe == "A")
+a_b <- which(av$classe == "B")
+a_c <- which(av$classe == "C")
+a_d <- which(av$classe == "D")
+a_e <- which(av$classe == "E")
+
+wa_a <- which(pred_adelmo[a_a] != "A")
+wa_b <- which(pred_adelmo[a_b] != "B")
+wa_c <- which(pred_adelmo[a_c] != "C")
+wa_d <- which(pred_adelmo[a_d] != "D")
+wa_e <- which(pred_adelmo[a_e] != "E")
+
+## carlitos'
+
+wca <- which(pred_carlitos != v[[2]]$classe)
+ca_a <- which(v[[2]]$classe == "A")
+ca_b <- which(v[[2]]$classe == "B")
+ca_c <- which(v[[2]]$classe == "C")
+ca_d <- which(v[[2]]$classe == "D")
+ca_e <- which(v[[2]]$classe == "E")
+
+wca_a <- which(pred_carlitos[ca_a] != "A")
+wca_b <- which(pred_carlitos[ca_b] != "B")
+wca_c <- which(pred_carlitos[ca_c] != "C")
+wca_d <- which(pred_carlitos[ca_d] != "D")
+wca_e <- which(pred_carlitos[ca_e] != "E")
+
+## charles:
+wch <- which(pred_charles != v[[3]]$classe)
+ch_a <- which(v[[3]]$classe == "A")
+ch_b <- which(v[[3]]$classe == "B")
+ch_c <- which(v[[3]]$classe == "C")
+ch_d <- which(v[[3]]$classe == "D")
+ch_e <- which(v[[3]]$classe == "E")
+
+wch_a <- which(pred_charles[ch_a] != "A")
+wch_b <- which(pred_charles[ch_b] != "B")
+wch_c <- which(pred_charles[ch_c] != "C")
+wch_d <- which(pred_charles[ch_d] != "D")
+wch_e <- which(pred_charles[ch_e] != "E")
+
+## eurico:
+we <- which(pred_eurico != v[[4]]$classe)
+e_a <- which(v[[4]]$classe == "A")
+e_b <- which(v[[4]]$classe == "B")
+e_c <- which(v[[4]]$classe == "C")
+e_d <- which(v[[4]]$classe == "D")
+e_e <- which(v[[4]]$classe == "E")
+
+we_a <- which(pred_eurico[e_a] != "A")
+we_b <- which(pred_eurico[e_b] != "B")
+we_c <- which(pred_eurico[e_c] != "C")
+we_d <- which(pred_eurico[e_d] != "D")
+we_e <- which(pred_eurico[e_e] != "E")
+
+## jeremy
+wj <- which(pred_jeremy != jv$classe)
+j_a <- which(jv$classe == "A")
+j_b <- which(jv$classe == "B")
+j_c <- which(jv$classe == "C")
+j_d <- which(jv$classe == "D")
+j_e <- which(jv$classe == "E")
+
+wj_a <- which(pred_jeremy[j_a] != "A")
+wj_b <- which(pred_jeremy[j_b] != "B")
+wj_c <- which(pred_jeremy[j_c] != "C")
+wj_d <- which(pred_jeremy[j_d] != "D")
+wj_e <- which(pred_jeremy[j_e] != "E")
+
+## pedro
+wp <- which(pred_pedro != v[[6]]$classe)
+p_a <- which(v[[6]]$classe == "A")
+p_b <- which(v[[6]]$classe == "B")
+p_c <- which(v[[6]]$classe == "C")
+p_d <- which(v[[6]]$classe == "D")
+p_e <- which(v[[6]]$classe == "E")
+
+wp_a <- which(pred_pedro[p_a] != "A")
+wp_b <- which(pred_pedro[p_b] != "B")
+wp_c <- which(pred_pedro[p_c] != "C")
+wp_d <- which(pred_pedro[p_d] != "D")
+wp_e <- which(pred_pedro[p_e] != "E")
+
+## total out-of-sample-error:
+t <- table(validation$classe)
+oos_tot <- (length(wa) + length(wca) + length(wch) + length(wj) + length(wp))/
+      length(validation$classe)
+oos_A <- (length(wa_a) + length(wca_a) + length(wch_a) + length(wj_a) + length(wp_a))/
+      t[1]
+oos_B <- (length(wa_b) + length(wca_b) + length(wch_b) + length(wj_b) + length(wp_b))/
+      t[2]
+oos_C <- (length(wa_c) + length(wca_c) + length(wch_c) + length(wj_c) + length(wp_c))/
+      t[3]
+oos_D <- (length(wa_d) + length(wca_d) + length(wch_d) + length(wj_d) + length(wp_d))/
+      t[4]
+oos_E <- (length(wa_e) + length(wca_e) + length(wch_e) + length(wj_e) + length(wp_e))/
+      t[5]
+
+oos_adelmo <- length(wa)/length(av$classe)
+oos_carlitos <- length(wca)/length(v[[2]]$classe)
+oos_charles <- length(wch)/length(v[[3]]$classe)
+oos_eurico <- length(we)/length(v[[4]]$classe)
+oos_jeremy <- length(wj)/length(jv$classe)
+oos_pedro <- length(wp)/length(v[[6]]$classe)
+
+user_OOS <- data.frame(adelmo = oos_adelmo, carlitos = oos_carlitos, charles = oos_charles,
+                 eurico = oos_eurico, jeremy = oos_jeremy, pedro = oos_pedro)
+print(user_OOS)
+class_OOS <- data.frame(A = oos_A, B = oos_B, C = oos_C, D = oos_D, E = oos_E)
+print(class_OOS)
+```
+The overall out-of-sample error is `r oos_tot`.
+
