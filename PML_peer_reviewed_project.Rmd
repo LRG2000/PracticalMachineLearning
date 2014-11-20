@@ -1,7 +1,7 @@
 ---
-title: "PML_peer_reviewed_project"
+title: "HAR data classification"
 author: "Lauren Grodnicki"
-date: "September 20, 2014"
+date: "September 21, 2014"
 output: html_document
 ---
 In this project we use the Weight Lifting Exercises Dataset (http://groupware.les.inf.puc-rio.br/static/WLE/WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv) from the HAR project (see http://groupware.les.inf.puc-rio.br/har). The goal of this project was to determine the class of activity of twenty test samples after training an algorithm on 19,622 "training" samples. 
@@ -277,7 +277,7 @@ j_b <- which(jv$classe == "B")
 j_c <- which(jv$classe == "C")
 j_d <- which(jv$classe == "D")
 j_e <- which(jv$classe == "E")
-
+ 
 wj_a <- which(pred_jeremy[j_a] != "A")
 wj_b <- which(pred_jeremy[j_b] != "B")
 wj_c <- which(pred_jeremy[j_c] != "C")
